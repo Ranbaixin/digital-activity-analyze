@@ -18,7 +18,12 @@ import {
   ShieldAlert,
   X,
   Plus,
-  Play
+  Play,
+  Send,
+  MessageSquare,
+  User,
+  Bot,
+  Download
 } from 'lucide-react';
 import { 
   BarChart, 
@@ -38,7 +43,7 @@ import { motion, AnimatePresence } from 'motion/react';
 import { GoogleGenAI } from "@google/genai";
 import Papa from 'papaparse';
 import { cn } from './lib/utils';
-import { ActivityItem, ActivitySummary, AIConfig } from './types';
+import { ActivityItem, ActivitySummary, AIConfig, ChatMessage } from './types';
 
 const COLORS = ['#8b5cf6', '#ec4899', '#3b82f6', '#10b981', '#f59e0b', '#ef4444'];
 
@@ -51,7 +56,11 @@ export default function App() {
   const [aiConfig, setAiConfig] = useState<AIConfig | null>(null);
   const [pendingFiles, setPendingFiles] = useState<File[]>([]);
   const [isDragging, setIsDragging] = useState(false);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [userInput, setUserInput] = useState('');
+  const [chatLoading, setChatLoading] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const chatEndRef = useRef<HTMLDivElement>(null);
 
   // Load AI configuration from public/ai-config.json
   useEffect(() => {
@@ -63,6 +72,11 @@ export default function App() {
         setAiConfig({ provider: 'gemini', apiKey: '', model: '', enabled: false });
       });
   }, []);
+
+  // Auto-scroll chat to bottom
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages]);
 
   const handleFileUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
     const files = event.target.files;
@@ -352,6 +366,10 @@ export default function App() {
         topDomains,
         aiSummary: aiSummaryText
       });
+
+      if (aiConfig?.enabled) {
+        setMessages([{ role: 'assistant', content: aiSummaryText }]);
+      }
     } catch (err) {
       console.error(err);
       setError("AI 分析过程中出现错误。");
@@ -361,6 +379,68 @@ export default function App() {
     }
   };
 
+  const sendMessage = async () => {
+    if (!userInput.trim() || !aiConfig?.enabled || chatLoading) return;
+
+    const newUserMessage: ChatMessage = { role: 'user', content: userInput };
+    setMessages(prev => [...prev, newUserMessage]);
+    setUserInput('');
+    setChatLoading(true);
+
+    try {
+      const domainList = summary?.topDomains.map(d => `${d.domain} (${d.count}次)`).join(', ');
+      const contextPrompt = `用户正在基于其数字足迹数据与你交流。
+主要访问域名：${domainList}
+之前的 AI 总结：${summary?.aiSummary}
+
+请根据以上背景回答用户的问题。`;
+
+      if (aiConfig.provider === 'gemini') {
+        const apiKey = aiConfig.apiKey || process.env.GEMINI_API_KEY!;
+        const ai = new GoogleGenAI({ apiKey });
+        
+        // Construct history for Gemini
+        const history = messages.map(msg => ({
+          role: msg.role === 'user' ? 'user' : 'model',
+          parts: [{ text: msg.content }]
+        }));
+
+        const chat = ai.chats.create({
+          model: aiConfig.model || "gemini-3.1-flash-lite-preview",
+          config: { systemInstruction: contextPrompt },
+          history: history
+        });
+
+        const response = await chat.sendMessage({ message: userInput });
+        const aiMessage: ChatMessage = { role: 'assistant', content: response.text || "抱歉，我无法回答。" };
+        setMessages(prev => [...prev, aiMessage]);
+      } else if (aiConfig.provider === 'openai') {
+        const response = await fetch(`${aiConfig.baseUrl || 'https://api.openai.com/v1'}/chat/completions`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${aiConfig.apiKey}`
+          },
+          body: JSON.stringify({
+            model: aiConfig.model,
+            messages: [
+              { role: 'system', content: contextPrompt },
+              ...messages.map(m => ({ role: m.role, content: m.content })),
+              { role: 'user', content: userInput }
+            ]
+          })
+        });
+        const result = await response.json();
+        const aiMessage: ChatMessage = { role: 'assistant', content: result.choices?.[0]?.message?.content || "接口调用失败。" };
+        setMessages(prev => [...prev, aiMessage]);
+      }
+    } catch (e) {
+      console.error("Chat failed:", e);
+      setMessages(prev => [...prev, { role: 'assistant', content: "发送消息失败，请稍后重试。" }]);
+    } finally {
+      setChatLoading(false);
+    }
+  };
   const stats = useMemo(() => {
     if (!data.length) return null;
     const validTimes = data.map(d => new Date(d.time).getTime()).filter(t => !isNaN(t));
@@ -372,6 +452,38 @@ export default function App() {
       lastDate: new Date(Math.max(...validTimes)).toLocaleDateString(),
     };
   }, [data]);
+
+  const exportResults = () => {
+    if (!summary || !stats) return;
+
+    const exportData = {
+      metadata: {
+        exportTime: new Date().toISOString(),
+        appName: "数字足迹分析器",
+        stats: stats
+      },
+      analysis: {
+        timeDistribution: summary.timeDistribution,
+        weeklyDistribution: summary.weeklyDistribution,
+        topDomains: summary.topDomains,
+        dailyFrequency: summary.dailyFrequency
+      },
+      aiInsights: {
+        initialSummary: summary.aiSummary,
+        chatHistory: messages
+      }
+    };
+
+    const blob = new Blob([JSON.stringify(exportData, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `digital-footprint-analysis-${new Date().toISOString().split('T')[0]}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  };
 
   return (
     <div className="min-h-screen bg-[#fafafa] text-[#1a1a1a] font-sans selection:bg-violet-100">
@@ -385,6 +497,15 @@ export default function App() {
             <h1 className="font-bold text-xl tracking-tight">数字足迹分析器</h1>
           </div>
           <div className="flex items-center gap-4">
+            {data.length > 0 && (
+              <button 
+                onClick={exportResults}
+                className="flex items-center gap-2 px-4 py-2 bg-violet-50 text-violet-600 hover:bg-violet-100 rounded-xl text-sm font-bold transition-all"
+              >
+                <Download className="w-4 h-4" />
+                导出报告
+              </button>
+            )}
             <div className={cn(
               "flex items-center gap-2 px-3 py-1 rounded-full text-xs font-bold border",
               aiConfig?.enabled ? "bg-green-50 text-green-700 border-green-100" : "bg-gray-50 text-gray-500 border-gray-100"
@@ -394,7 +515,7 @@ export default function App() {
             </div>
             {data.length > 0 && (
               <button 
-                onClick={() => { setData([]); setSummary(null); setPendingFiles([]); }}
+                onClick={() => { setData([]); setSummary(null); setPendingFiles([]); setMessages([]); }}
                 className="text-sm font-medium text-gray-500 hover:text-gray-900 transition-colors"
               >
                 重新开始
@@ -697,12 +818,71 @@ export default function App() {
                         <div className="h-4 bg-gray-100 rounded-full w-5/6 animate-pulse" />
                       </div>
                     ) : (
-                      <p className={cn(
-                        "text-lg leading-relaxed whitespace-pre-wrap",
-                        aiConfig?.enabled ? "text-gray-700" : "text-gray-400 italic"
-                      )}>
-                        {summary?.aiSummary}
-                      </p>
+                      <div className="space-y-6">
+                        {/* Chat Messages */}
+                        <div className="space-y-4 max-h-[500px] overflow-y-auto pr-2 custom-scrollbar">
+                          {messages.map((msg, idx) => (
+                            <div 
+                              key={idx} 
+                              className={cn(
+                                "flex gap-3",
+                                msg.role === 'user' ? "flex-row-reverse" : "flex-row"
+                              )}
+                            >
+                              <div className={cn(
+                                "w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0",
+                                msg.role === 'user' ? "bg-violet-100 text-violet-600" : "bg-gray-100 text-gray-600"
+                              )}>
+                                {msg.role === 'user' ? <User className="w-4 h-4" /> : <Bot className="w-4 h-4" />}
+                              </div>
+                              <div className={cn(
+                                "max-w-[80%] p-4 rounded-2xl text-sm leading-relaxed",
+                                msg.role === 'user' 
+                                  ? "bg-violet-600 text-white rounded-tr-none" 
+                                  : "bg-gray-50 text-gray-700 rounded-tl-none border border-gray-100"
+                              )}>
+                                {msg.content}
+                              </div>
+                            </div>
+                          ))}
+                          {chatLoading && (
+                            <div className="flex gap-3">
+                              <div className="w-8 h-8 rounded-full bg-gray-100 flex items-center justify-center">
+                                <Bot className="w-4 h-4 text-gray-400" />
+                              </div>
+                              <div className="bg-gray-50 p-4 rounded-2xl rounded-tl-none border border-gray-100">
+                                <div className="flex gap-1">
+                                  <div className="w-1.5 h-1.5 bg-gray-300 rounded-full animate-bounce" />
+                                  <div className="w-1.5 h-1.5 bg-gray-300 rounded-full animate-bounce [animation-delay:0.2s]" />
+                                  <div className="w-1.5 h-1.5 bg-gray-300 rounded-full animate-bounce [animation-delay:0.4s]" />
+                                </div>
+                              </div>
+                            </div>
+                          )}
+                          <div ref={chatEndRef} />
+                        </div>
+
+                        {/* Chat Input */}
+                        {aiConfig?.enabled && (
+                          <div className="relative mt-4">
+                            <input 
+                              type="text"
+                              value={userInput}
+                              onChange={(e) => setUserInput(e.target.value)}
+                              onKeyDown={(e) => e.key === 'Enter' && sendMessage()}
+                              placeholder="询问 AI 关于你的数字足迹..."
+                              className="w-full pl-6 pr-12 py-4 bg-gray-50 border border-gray-100 rounded-2xl focus:outline-none focus:ring-2 focus:ring-violet-500/20 focus:border-violet-500 transition-all text-sm"
+                            />
+                            <button 
+                              onClick={sendMessage}
+                              disabled={chatLoading || !userInput.trim()}
+                              className="absolute right-2 top-1/2 -translate-y-1/2 p-2 bg-violet-600 text-white rounded-xl hover:bg-violet-700 disabled:bg-gray-200 disabled:text-gray-400 transition-all"
+                            >
+                              <Send className="w-4 h-4" />
+                            </button>
+                          </div>
+                        )}
+                      </div>
                     )}
                   </div>
                 </div>

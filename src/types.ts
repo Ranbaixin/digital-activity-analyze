@@ -16,6 +16,11 @@ export interface ActivityItem {
   clientName?: string;
 }
 
+export interface ChatMessage {
+  role: 'user' | 'assistant';
+  content: string;
+}
+
 export interface ActivitySummary {
   timeDistribution: { hour: number; count: number }[];
   weeklyDistribution: { day: string; count: number }[];
