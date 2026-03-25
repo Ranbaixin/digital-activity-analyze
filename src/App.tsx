@@ -15,7 +15,10 @@ import {
   Layout,
   Settings,
   ShieldCheck,
-  ShieldAlert
+  ShieldAlert,
+  X,
+  Plus,
+  Play
 } from 'lucide-react';
 import { 
   BarChart, 
@@ -46,6 +49,8 @@ export default function App() {
   const [summary, setSummary] = useState<ActivitySummary | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [aiConfig, setAiConfig] = useState<AIConfig | null>(null);
+  const [pendingFiles, setPendingFiles] = useState<File[]>([]);
+  const [isDragging, setIsDragging] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Load AI configuration from public/ai-config.json
@@ -60,19 +65,81 @@ export default function App() {
   }, []);
 
   const handleFileUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
-    const file = event.target.files?.[0];
-    if (!file) return;
-    processFile(file);
+    const files = event.target.files;
+    if (!files) return;
+    addFiles(Array.from(files));
+    if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
-  const processFile = (file: File) => {
+  const addFiles = (files: File[]) => {
+    const validFiles = files.filter(file => 
+      file.name.endsWith('.json') || file.name.endsWith('.csv')
+    );
+    if (validFiles.length < files.length) {
+      setError("部分文件格式不支持。请上传 JSON 或 CSV 文件。");
+    }
+    setPendingFiles(prev => [...prev, ...validFiles]);
+  };
+
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(true);
+  };
+
+  const handleDragLeave = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(false);
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setIsDragging(false);
+    
+    const files = e.dataTransfer.files;
+    if (files && files.length > 0) {
+      addFiles(Array.from(files));
+    }
+  };
+
+  const removeFile = (index: number) => {
+    setPendingFiles(prev => prev.filter((_, i) => i !== index));
+  };
+
+  const startAnalysis = async () => {
+    if (pendingFiles.length === 0) return;
     setLoading(true);
     setError(null);
-    const reader = new FileReader();
-
-    reader.onload = (e) => {
-      const content = e.target?.result as string;
+    
+    const allItems: ActivityItem[] = [];
+    
+    for (const file of pendingFiles) {
       try {
+        const items = await processFile(file);
+        allItems.push(...items);
+      } catch (err) {
+        console.error(`Error processing ${file.name}:`, err);
+      }
+    }
+
+    if (allItems.length === 0) {
+      setError("未能从上传的文件中提取到任何有效数据。");
+      setLoading(false);
+      return;
+    }
+
+    setData(allItems);
+    analyzeActivity(allItems);
+  };
+
+  const processFile = (file: File): Promise<ActivityItem[]> => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        const content = e.target?.result as string;
+        try {
         let items: any[] = [];
         if (file.name.endsWith('.json')) {
           const parsed = JSON.parse(content);
@@ -123,8 +190,7 @@ export default function App() {
         }
 
         if (items.length === 0) {
-          setError("未能从文件中提取到有效数据。");
-          setLoading(false);
+          reject(new Error("未能从文件中提取到有效数据。"));
           return;
         }
 
@@ -150,10 +216,13 @@ export default function App() {
               }
             }
 
+            const dateObj = timeVal ? new Date(timeVal) : null;
+            const isValidDate = dateObj && !isNaN(dateObj.getTime());
+
             return {
               title: String(title),
               url: String(url),
-              time: timeVal ? new Date(timeVal).toISOString() : ""
+              time: isValidDate ? dateObj.toISOString() : ""
             };
           }
 
@@ -168,39 +237,37 @@ export default function App() {
 
           const url = item.url || item.titleUrl || item.link;
 
+          const dateObj = time ? new Date(time) : null;
+          const isValidDate = dateObj && !isNaN(dateObj.getTime());
+
           return {
             ...item,
             title: String(title),
-            time: time ? new Date(time).toISOString() : "",
+            time: isValidDate ? dateObj.toISOString() : "",
             url: String(url || "")
           };
-        }).filter(item => item.time !== "" && !isNaN(new Date(item.time).getTime()));
+        }).filter(item => item.time !== "");
 
-        if (normalizedItems.length === 0) {
-          setError("文件中没有包含有效的时间戳信息，无法进行时间维度分析。");
-          setLoading(false);
-          return;
-        }
-
-        setData(normalizedItems);
-        analyzeActivity(normalizedItems);
+        resolve(normalizedItems);
       } catch (err) {
-        console.error(err);
-        setError("文件解析失败。请确保文件格式正确（JSON 或 CSV）。");
-        setLoading(false);
+        reject(err);
       }
     };
-
+    reader.onerror = reject;
     reader.readAsText(file);
-  };
+  });
+};
 
   const analyzeActivity = async (items: ActivityItem[]) => {
     setAnalyzing(true);
     try {
       const timeDist = new Array(24).fill(0);
+      const weekDist = new Array(7).fill(0);
       const dailyFreq: Record<string, number> = {};
       const domains: Record<string, number> = {};
       const titles: string[] = [];
+
+      const weekDays = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
 
       items.forEach(item => {
         const timeVal = item.time;
@@ -210,6 +277,8 @@ export default function App() {
         if (isNaN(date.getTime())) return;
 
         timeDist[date.getHours()]++;
+        weekDist[date.getDay()]++;
+        
         const dateStr = date.toISOString().split('T')[0];
         dailyFreq[dateStr] = (dailyFreq[dateStr] || 0) + 1;
 
@@ -226,6 +295,8 @@ export default function App() {
       });
 
       const timeDistribution = timeDist.map((count, hour) => ({ hour, count }));
+      const weeklyDistribution = weekDist.map((count, day) => ({ day: weekDays[day], count }));
+      
       const dailyFrequency = Object.entries(dailyFreq)
         .map(([date, count]) => ({ date, count }))
         .sort((a, b) => a.date.localeCompare(b.date))
@@ -276,6 +347,7 @@ export default function App() {
 
       setSummary({
         timeDistribution,
+        weeklyDistribution,
         dailyFrequency,
         topDomains,
         aiSummary: aiSummaryText
@@ -322,7 +394,7 @@ export default function App() {
             </div>
             {data.length > 0 && (
               <button 
-                onClick={() => { setData([]); setSummary(null); }}
+                onClick={() => { setData([]); setSummary(null); setPendingFiles([]); }}
                 className="text-sm font-medium text-gray-500 hover:text-gray-900 transition-colors"
               >
                 重新开始
@@ -344,7 +416,7 @@ export default function App() {
             >
               <div className="text-center mb-12">
                 <h2 className="text-4xl font-extrabold mb-4 tracking-tight">洞察你的数字人生</h2>
-                <p className="text-gray-500 text-lg">上传你的浏览器历史记录或 Google 活动记录，我们将为你揭示你的数字生活全貌。</p>
+                <p className="text-gray-500 text-lg">上传一个或多个浏览器历史记录文件，我们将为你揭示你的数字生活全貌。</p>
                 {!aiConfig?.enabled && (
                   <div className="mt-4 p-3 bg-amber-50 border border-amber-100 rounded-xl text-amber-700 text-sm flex items-center justify-center gap-2">
                     <AlertCircle className="w-4 h-4" />
@@ -353,30 +425,88 @@ export default function App() {
                 )}
               </div>
 
-              <div 
-                onClick={() => fileInputRef.current?.click()}
-                className={cn(
-                  "group relative border-2 border-dashed border-gray-200 rounded-3xl p-12 transition-all cursor-pointer",
-                  "hover:border-violet-400 hover:bg-violet-50/30",
-                  loading && "pointer-events-none opacity-50"
-                )}
-              >
-                <input 
-                  type="file" 
-                  ref={fileInputRef}
-                  onChange={handleFileUpload}
-                  accept=".json,.csv"
-                  className="hidden"
-                />
-                <div className="flex flex-col items-center gap-4">
-                  <div className="w-16 h-16 bg-white rounded-2xl shadow-sm border border-gray-100 flex items-center justify-center group-hover:scale-110 transition-transform">
-                    <Upload className="w-8 h-8 text-violet-600" />
-                  </div>
-                  <div className="text-center">
-                    <p className="font-semibold text-lg">点击或拖拽文件到这里</p>
-                    <p className="text-sm text-gray-400 mt-1">支持 Chrome 历史记录插件导出或 Google Takeout 数据</p>
+              <div className="space-y-6">
+                <div 
+                  onClick={() => fileInputRef.current?.click()}
+                  onDragOver={handleDragOver}
+                  onDragLeave={handleDragLeave}
+                  onDrop={handleDrop}
+                  className={cn(
+                    "group relative border-2 border-dashed rounded-3xl p-12 transition-all cursor-pointer",
+                    isDragging ? "border-violet-500 bg-violet-50/50 scale-[1.02]" : "border-gray-200 hover:border-violet-400 hover:bg-violet-50/30",
+                    loading && "pointer-events-none opacity-50"
+                  )}
+                >
+                  <input 
+                    type="file" 
+                    ref={fileInputRef}
+                    onChange={handleFileUpload}
+                    accept=".json,.csv"
+                    multiple
+                    className="hidden"
+                  />
+                  <div className="flex flex-col items-center gap-4">
+                    <div className="w-16 h-16 bg-white rounded-2xl shadow-sm border border-gray-100 flex items-center justify-center group-hover:scale-110 transition-transform">
+                      <Upload className="w-8 h-8 text-violet-600" />
+                    </div>
+                    <div className="text-center">
+                      <p className="font-semibold text-lg">点击或拖拽文件到这里</p>
+                      <p className="text-sm text-gray-400 mt-1">支持 Chrome 历史记录插件导出或 Google Takeout 数据</p>
+                    </div>
                   </div>
                 </div>
+
+                {pendingFiles.length > 0 && (
+                  <motion.div 
+                    initial={{ opacity: 0, height: 0 }}
+                    animate={{ opacity: 1, height: 'auto' }}
+                    className="bg-white rounded-3xl border border-gray-100 shadow-sm overflow-hidden"
+                  >
+                    <div className="p-6 border-b border-gray-50 flex items-center justify-between">
+                      <h3 className="font-bold flex items-center gap-2">
+                        <FileJson className="w-5 h-5 text-violet-600" />
+                        已选择的文件 ({pendingFiles.length})
+                      </h3>
+                      <button 
+                        onClick={() => setPendingFiles([])}
+                        className="text-xs text-gray-400 hover:text-red-500 transition-colors"
+                      >
+                        清空全部
+                      </button>
+                    </div>
+                    <div className="max-h-48 overflow-y-auto p-4 space-y-2">
+                      {pendingFiles.map((file, idx) => (
+                        <div key={idx} className="flex items-center justify-between p-3 bg-gray-50 rounded-xl group">
+                          <div className="flex items-center gap-3 overflow-hidden">
+                            <FileSpreadsheet className="w-4 h-4 text-gray-400 flex-shrink-0" />
+                            <span className="text-sm font-medium truncate">{file.name}</span>
+                            <span className="text-xs text-gray-400">{(file.size / 1024).toFixed(1)} KB</span>
+                          </div>
+                          <button 
+                            onClick={(e) => { e.stopPropagation(); removeFile(idx); }}
+                            className="p-1 text-gray-300 hover:text-red-500 hover:bg-red-50 rounded-lg transition-all"
+                          >
+                            <X className="w-4 h-4" />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                    <div className="p-4 bg-gray-50/50 border-t border-gray-50">
+                      <button 
+                        onClick={startAnalysis}
+                        disabled={loading}
+                        className="w-full py-4 bg-violet-600 hover:bg-violet-700 disabled:bg-gray-300 text-white rounded-2xl font-bold flex items-center justify-center gap-2 transition-all shadow-lg shadow-violet-200"
+                      >
+                        {loading ? (
+                          <div className="w-5 h-5 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                        ) : (
+                          <Play className="w-5 h-5 fill-current" />
+                        )}
+                        {loading ? "正在处理数据..." : "开始分析"}
+                      </button>
+                    </div>
+                  </motion.div>
+                )}
               </div>
 
               {error && (
@@ -468,6 +598,39 @@ export default function App() {
                         <Bar dataKey="count" radius={[4, 4, 0, 0]}>
                           {summary?.timeDistribution.map((entry, index) => (
                             <Cell key={`cell-${index}`} fill={entry.count > 0 ? '#8b5cf6' : '#e5e7eb'} />
+                          ))}
+                        </Bar>
+                      </BarChart>
+                    </ResponsiveContainer>
+                  </div>
+                </div>
+
+                {/* Weekly Distribution */}
+                <div className="bg-white p-8 rounded-3xl border border-gray-100 shadow-sm">
+                  <div className="flex items-center justify-between mb-8">
+                    <div className="flex items-center gap-3">
+                      <Calendar className="w-6 h-6 text-indigo-600" />
+                      <h3 className="text-xl font-bold">周活跃分布</h3>
+                    </div>
+                  </div>
+                  <div className="h-[300px] w-full">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <BarChart data={summary?.weeklyDistribution}>
+                        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f0f0f0" />
+                        <XAxis 
+                          dataKey="day" 
+                          axisLine={false} 
+                          tickLine={false} 
+                          tick={{ fontSize: 12, fill: '#999' }}
+                        />
+                        <YAxis hide />
+                        <Tooltip 
+                          cursor={{ fill: '#f5f3ff' }}
+                          contentStyle={{ borderRadius: '16px', border: 'none', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)' }}
+                        />
+                        <Bar dataKey="count" radius={[4, 4, 0, 0]}>
+                          {summary?.weeklyDistribution.map((entry, index) => (
+                            <Cell key={`cell-${index}`} fill={entry.count > 0 ? '#6366f1' : '#e5e7eb'} />
                           ))}
                         </Bar>
                       </BarChart>

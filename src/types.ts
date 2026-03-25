@@ -18,6 +18,7 @@ export interface ActivityItem {
 
 export interface ActivitySummary {
   timeDistribution: { hour: number; count: number }[];
+  weeklyDistribution: { day: string; count: number }[];
   dailyFrequency: { date: string; count: number }[];
   topDomains: { domain: string; count: number }[];
   aiSummary: string;
