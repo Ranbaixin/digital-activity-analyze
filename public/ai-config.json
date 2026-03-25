@@ -1,0 +1,8 @@
+{
+  "provider": "gemini",
+  "apiKey": "",
+  "baseUrl": "",
+  "model": "gemini-3.1-flash-lite-preview",
+  "enabled": false,
+  "description": "在这里配置您的 AI 接口。支持 gemini 或 openai (兼容格式)。修改后请刷新页面。"
+}
