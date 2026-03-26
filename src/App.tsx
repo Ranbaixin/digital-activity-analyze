@@ -42,6 +42,7 @@ import {
 import { motion, AnimatePresence } from 'motion/react';
 import { GoogleGenAI } from "@google/genai";
 import Papa from 'papaparse';
+import Markdown from 'react-markdown';
 import { cn } from './lib/utils';
 import { ActivityItem, ActivitySummary, AIConfig, ChatMessage } from './types';
 
@@ -330,7 +331,13 @@ export default function App() {
       if (aiConfig?.enabled) {
         const sampleData = titles.slice(0, 150).join('\n');
         const domainList = topDomains.map(d => `${d.domain} (${d.count}次)`).join(', ');
-        const prompt = `以下是用户的数字浏览/活动记录：\n主要访问域名：${domainList}\n部分页面标题：\n${sampleData}\n\n请根据这些数据分析用户的数字生活习惯、兴趣领域、工作/娱乐倾向，并给出一个深度总结。请用中文回答。`;
+        const prompt = `以下是用户的数字浏览/活动记录：
+主要访问域名：${domainList}
+部分页面标题：
+${sampleData}
+
+请根据这些数据分析用户的数字生活习惯、兴趣领域、工作/娱乐倾向，并给出一个深度总结。
+请使用结构化的 Markdown 格式（如使用 ### 标题、- 列表、**加粗** 等），确保排版整洁公整、层次分明。请用中文回答。`;
 
         try {
           if (aiConfig.provider === 'gemini') {
@@ -396,7 +403,8 @@ export default function App() {
 主要访问域名：${domainList}
 之前的 AI 总结：${summary?.aiSummary}
 
-请根据以上背景回答用户的问题。`;
+请根据以上背景回答用户的问题。
+请使用结构化的 Markdown 格式回答，确保排版整洁公整、层次分明。`;
 
       if (aiConfig.provider === 'gemini') {
         const apiKey = aiConfig.apiKey || process.env.GEMINI_API_KEY!;
@@ -845,11 +853,24 @@ export default function App() {
                           cursor={{ fill: '#f5f3ff' }}
                           contentStyle={{ borderRadius: '16px', border: 'none', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)' }}
                           labelFormatter={(h) => `${h}:00`}
+                          content={({ active, payload }) => {
+                            if (active && payload && payload.length) {
+                              return (
+                                <div className="bg-white p-3 rounded-xl shadow-xl border border-gray-50">
+                                  <p className="text-xs text-gray-400 mb-1">{payload[0].payload.hour}:00</p>
+                                  <p className="text-sm font-bold text-violet-600">
+                                    {payload[0].value} 次打开
+                                  </p>
+                                </div>
+                              );
+                            }
+                            return null;
+                          }}
                         />
                         <Bar 
                           dataKey="count" 
                           radius={[4, 4, 0, 0]}
-                          onClick={(data) => setSelectedHour(data.hour)}
+                          onClick={(data: any) => setSelectedHour(data.hour)}
                           className="cursor-pointer"
                         >
                           {displaySummary?.timeDistribution.map((entry, index) => (
@@ -862,6 +883,30 @@ export default function App() {
                       </BarChart>
                     </ResponsiveContainer>
                   </div>
+                  {selectedHour !== null && (
+                    <div className="mt-4 p-4 bg-violet-50 rounded-3xl border border-violet-100 space-y-3">
+                      <div className="flex items-center justify-between">
+                        <span className="text-sm text-violet-700 font-bold">
+                          {selectedHour}:00 时段共访问
+                        </span>
+                        <span className="text-xl font-black text-violet-600">
+                          {displaySummary?.timeDistribution.find(d => d.hour === selectedHour)?.count || 0} 次
+                        </span>
+                      </div>
+                      {displaySummary?.topDomains && displaySummary.topDomains.length > 0 && (
+                        <div className="space-y-2 pt-2 border-t border-violet-100">
+                          <p className="text-[10px] font-bold text-violet-400 uppercase tracking-widest">该时段最常访问</p>
+                          <div className="flex flex-wrap gap-2">
+                            {displaySummary.topDomains.slice(0, 3).map((d, i) => (
+                              <div key={i} className="px-2 py-1 bg-white rounded-lg border border-violet-100 text-[10px] text-violet-600 font-medium">
+                                {d.domain} ({d.count})
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
 
                 {/* Weekly Distribution */}
@@ -887,11 +932,24 @@ export default function App() {
                         <Tooltip 
                           cursor={{ fill: '#f5f3ff' }}
                           contentStyle={{ borderRadius: '16px', border: 'none', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)' }}
+                          content={({ active, payload }) => {
+                            if (active && payload && payload.length) {
+                              return (
+                                <div className="bg-white p-3 rounded-xl shadow-xl border border-gray-50">
+                                  <p className="text-xs text-gray-400 mb-1">{payload[0].payload.day}</p>
+                                  <p className="text-sm font-bold text-indigo-600">
+                                    {payload[0].value} 次打开
+                                  </p>
+                                </div>
+                              );
+                            }
+                            return null;
+                          }}
                         />
                         <Bar 
                           dataKey="count" 
                           radius={[4, 4, 0, 0]}
-                          onClick={(data) => {
+                          onClick={(data: any) => {
                             const weekDays = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
                             const idx = weekDays.indexOf(data.day);
                             if (idx !== -1) setSelectedWeekday(idx);
@@ -908,6 +966,30 @@ export default function App() {
                       </BarChart>
                     </ResponsiveContainer>
                   </div>
+                  {selectedWeekday !== null && (
+                    <div className="mt-4 p-4 bg-indigo-50 rounded-3xl border border-indigo-100 space-y-3">
+                      <div className="flex items-center justify-between">
+                        <span className="text-sm text-indigo-700 font-bold">
+                          {['周日', '周一', '周二', '周三', '周四', '周五', '周六'][selectedWeekday]} 共访问
+                        </span>
+                        <span className="text-xl font-black text-indigo-600">
+                          {displaySummary?.weeklyDistribution[selectedWeekday]?.count || 0} 次
+                        </span>
+                      </div>
+                      {displaySummary?.topDomains && displaySummary.topDomains.length > 0 && (
+                        <div className="space-y-2 pt-2 border-t border-indigo-100">
+                          <p className="text-[10px] font-bold text-indigo-400 uppercase tracking-widest">该日最常访问</p>
+                          <div className="flex flex-wrap gap-2">
+                            {displaySummary.topDomains.slice(0, 3).map((d, i) => (
+                              <div key={i} className="px-2 py-1 bg-white rounded-lg border border-indigo-100 text-[10px] text-indigo-600 font-medium">
+                                {d.domain} ({d.count})
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
 
                 {/* Top Domains */}
@@ -915,7 +997,9 @@ export default function App() {
                   <div className="flex items-center justify-between mb-8">
                     <div className="flex items-center gap-3">
                       <Globe className="w-6 h-6 text-blue-600" />
-                      <h3 className="text-xl font-bold">最常访问域名</h3>
+                      <h3 className="text-xl font-bold">
+                        {isAnyFilterActive ? "当前筛选下的热门网站" : "最常访问域名"}
+                      </h3>
                     </div>
                     <span className="text-xs text-gray-400">点击域名查看详情</span>
                   </div>
@@ -923,21 +1007,21 @@ export default function App() {
                     <ResponsiveContainer width="100%" height="100%">
                       <PieChart>
                         <Pie
-                          data={summary?.topDomains}
+                          data={displaySummary?.topDomains}
                           dataKey="count"
                           nameKey="domain"
                           cx="50%"
                           cy="50%"
                           outerRadius={80}
-                          label={({ domain }) => domain}
+                          label={(props: any) => props.domain}
                           onClick={(data: any) => setSelectedDomain(data.domain)}
                           className="cursor-pointer"
                         >
-                          {summary?.topDomains.map((entry, index) => (
+                          {displaySummary?.topDomains?.map((entry, index) => (
                             <Cell 
                               key={`cell-${index}`} 
                               fill={entry.domain === selectedDomain ? '#4f46e5' : COLORS[index % COLORS.length]} 
-                              stroke={entry.domain === selectedDomain ? '#fff' : 'none'}
+                              stroke={entry.domain === (selectedDomain as any) ? '#fff' : 'none'}
                               strokeWidth={2}
                             />
                           ))}
@@ -949,7 +1033,7 @@ export default function App() {
                     </ResponsiveContainer>
                   </div>
                   <div className="grid grid-cols-2 gap-2 mt-4">
-                    {summary?.topDomains.map((d, i) => (
+                    {displaySummary?.topDomains?.map((d, i) => (
                       <button
                         key={i}
                         onClick={() => setSelectedDomain(d.domain)}
@@ -994,49 +1078,69 @@ export default function App() {
                         <div className="h-4 bg-gray-100 rounded-full w-5/6 animate-pulse" />
                       </div>
                     ) : (
-                      <div className="space-y-6">
-                        {/* Chat Messages */}
-                        <div className="space-y-4 max-h-[500px] overflow-y-auto pr-2 custom-scrollbar">
-                          {messages.map((msg, idx) => (
-                            <div 
-                              key={idx} 
-                              className={cn(
-                                "flex gap-3",
-                                msg.role === 'user' ? "flex-row-reverse" : "flex-row"
-                              )}
-                            >
-                              <div className={cn(
-                                "w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0",
-                                msg.role === 'user' ? "bg-violet-100 text-violet-600" : "bg-gray-100 text-gray-600"
-                              )}>
-                                {msg.role === 'user' ? <User className="w-4 h-4" /> : <Bot className="w-4 h-4" />}
-                              </div>
-                              <div className={cn(
-                                "max-w-[80%] p-4 rounded-2xl text-sm leading-relaxed",
-                                msg.role === 'user' 
-                                  ? "bg-violet-600 text-white rounded-tr-none" 
-                                  : "bg-gray-50 text-gray-700 rounded-tl-none border border-gray-100"
-                              )}>
-                                {msg.content}
-                              </div>
+                      <div className="space-y-8">
+                        {/* Initial Analysis - Prominent Display */}
+                        {messages.length > 0 && (
+                          <div className="bg-violet-50/50 p-6 rounded-3xl border border-violet-100 relative">
+                            <div className="absolute -top-3 left-6 px-3 py-1 bg-violet-600 text-white text-[10px] font-bold rounded-full uppercase tracking-widest">
+                              核心洞察
                             </div>
-                          ))}
-                          {chatLoading && (
-                            <div className="flex gap-3">
-                              <div className="w-8 h-8 rounded-full bg-gray-100 flex items-center justify-center">
-                                <Bot className="w-4 h-4 text-gray-400" />
-                              </div>
-                              <div className="bg-gray-50 p-4 rounded-2xl rounded-tl-none border border-gray-100">
-                                <div className="flex gap-1">
-                                  <div className="w-1.5 h-1.5 bg-gray-300 rounded-full animate-bounce" />
-                                  <div className="w-1.5 h-1.5 bg-gray-300 rounded-full animate-bounce [animation-delay:0.2s]" />
-                                  <div className="w-1.5 h-1.5 bg-gray-300 rounded-full animate-bounce [animation-delay:0.4s]" />
+                            <div className="text-gray-800 leading-relaxed prose prose-sm prose-violet max-w-none">
+                              <Markdown>{messages[0].content}</Markdown>
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Chat History - Secondary Display */}
+                        {messages.length > 1 && (
+                          <div className="space-y-6 pt-6 border-t border-gray-100">
+                            <h4 className="text-sm font-bold text-gray-400 uppercase tracking-widest flex items-center gap-2">
+                              <MessageSquare className="w-4 h-4" />
+                              对话历史
+                            </h4>
+                            <div className="space-y-4 max-h-[400px] overflow-y-auto pr-2 custom-scrollbar">
+                              {messages.slice(1).map((msg, idx) => (
+                                <div 
+                                  key={idx} 
+                                  className={cn(
+                                    "flex gap-3",
+                                    msg.role === 'user' ? "flex-row-reverse" : "flex-row"
+                                  )}
+                                >
+                                  <div className={cn(
+                                    "w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0",
+                                    msg.role === 'user' ? "bg-violet-100 text-violet-600" : "bg-gray-100 text-gray-600"
+                                  )}>
+                                    {msg.role === 'user' ? <User className="w-4 h-4" /> : <Bot className="w-4 h-4" />}
+                                  </div>
+                                  <div className={cn(
+                                    "max-w-[85%] p-4 rounded-2xl text-sm leading-relaxed",
+                                    msg.role === 'user' 
+                                      ? "bg-violet-600 text-white rounded-tr-none" 
+                                      : "bg-gray-50 text-gray-700 rounded-tl-none border border-gray-100 prose prose-sm prose-violet max-w-none"
+                                  )}>
+                                    {msg.role === 'user' ? msg.content : <Markdown>{msg.content}</Markdown>}
+                                  </div>
                                 </div>
-                              </div>
+                              ))}
+                              {chatLoading && (
+                                <div className="flex gap-3">
+                                  <div className="w-8 h-8 rounded-full bg-gray-100 flex items-center justify-center">
+                                    <Bot className="w-4 h-4 text-gray-400" />
+                                  </div>
+                                  <div className="bg-gray-50 p-4 rounded-2xl rounded-tl-none border border-gray-100">
+                                    <div className="flex gap-1">
+                                      <div className="w-1.5 h-1.5 bg-gray-300 rounded-full animate-bounce" />
+                                      <div className="w-1.5 h-1.5 bg-gray-300 rounded-full animate-bounce [animation-delay:0.2s]" />
+                                      <div className="w-1.5 h-1.5 bg-gray-300 rounded-full animate-bounce [animation-delay:0.4s]" />
+                                    </div>
+                                  </div>
+                                </div>
+                              )}
+                              <div ref={chatEndRef} />
                             </div>
-                          )}
-                          <div ref={chatEndRef} />
-                        </div>
+                          </div>
+                        )}
 
                         {/* Chat Input */}
                         {aiConfig?.enabled && (
