@@ -59,6 +59,9 @@ export default function App() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [userInput, setUserInput] = useState('');
   const [chatLoading, setChatLoading] = useState(false);
+  const [selectedDomain, setSelectedDomain] = useState<string | null>(null);
+  const [selectedHour, setSelectedHour] = useState<number | null>(null);
+  const [selectedWeekday, setSelectedWeekday] = useState<number | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
 
@@ -441,17 +444,88 @@ export default function App() {
       setChatLoading(false);
     }
   };
+  const filteredData = useMemo(() => {
+    if (!data.length) return [];
+    return data.filter(item => {
+      const date = new Date(item.time);
+      if (isNaN(date.getTime())) return false;
+
+      if (selectedDomain) {
+        try {
+          const domain = new URL(item.url).hostname.replace('www.', '');
+          if (domain !== selectedDomain) return false;
+        } catch (e) { return false; }
+      }
+
+      if (selectedHour !== null) {
+        if (date.getHours() !== selectedHour) return false;
+      }
+
+      if (selectedWeekday !== null) {
+        if (date.getDay() !== selectedWeekday) return false;
+      }
+
+      return true;
+    });
+  }, [data, selectedDomain, selectedHour, selectedWeekday]);
+
   const stats = useMemo(() => {
-    if (!data.length) return null;
-    const validTimes = data.map(d => new Date(d.time).getTime()).filter(t => !isNaN(t));
-    if (!validTimes.length) return { total: data.length, firstDate: '未知', lastDate: '未知' };
+    if (!filteredData.length) return null;
+    const validTimes = filteredData.map(d => new Date(d.time).getTime()).filter(t => !isNaN(t));
+    if (!validTimes.length) return { total: filteredData.length, firstDate: '未知', lastDate: '未知' };
     
     return {
-      total: data.length,
+      total: filteredData.length,
       firstDate: new Date(Math.min(...validTimes)).toLocaleDateString(),
       lastDate: new Date(Math.max(...validTimes)).toLocaleDateString(),
     };
-  }, [data]);
+  }, [filteredData]);
+
+  const filteredSummary = useMemo(() => {
+    if (!data.length) return null;
+    const isFiltered = selectedDomain !== null || selectedHour !== null || selectedWeekday !== null;
+    if (!isFiltered) return null;
+
+    const timeDist = new Array(24).fill(0);
+    const weekDist = new Array(7).fill(0);
+    const dailyFreq: Record<string, number> = {};
+    const domains: Record<string, number> = {};
+    const weekDays = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
+
+    filteredData.forEach(item => {
+      const date = new Date(item.time);
+      if (isNaN(date.getTime())) return;
+      
+      timeDist[date.getHours()]++;
+      weekDist[date.getDay()]++;
+      
+      const dateStr = date.toISOString().split('T')[0];
+      dailyFreq[dateStr] = (dailyFreq[dateStr] || 0) + 1;
+
+      if (item.url) {
+        try {
+          const domain = new URL(item.url).hostname.replace('www.', '');
+          domains[domain] = (domains[domain] || 0) + 1;
+        } catch (e) {}
+      }
+    });
+
+    return {
+      timeDistribution: timeDist.map((count, hour) => ({ hour, count })),
+      weeklyDistribution: weekDist.map((count, day) => ({ day: weekDays[day], count })),
+      dailyFrequency: Object.entries(dailyFreq)
+        .map(([date, count]) => ({ date, count }))
+        .sort((a, b) => a.date.localeCompare(b.date))
+        .slice(-30),
+      topDomains: Object.entries(domains)
+        .map(([domain, count]) => ({ domain, count }))
+        .sort((a, b) => b.count - a.count)
+        .slice(0, 6),
+    };
+  }, [filteredData, selectedDomain, selectedHour, selectedWeekday, data]);
+
+  const displaySummary = filteredSummary || summary;
+  const isAnyFilterActive = selectedDomain !== null || selectedHour !== null || selectedWeekday !== null;
 
   const exportResults = () => {
     if (!summary || !stats) return;
@@ -664,12 +738,27 @@ export default function App() {
             >
               {/* Stats Overview */}
               <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-                <div className="bg-white p-6 rounded-3xl border border-gray-100 shadow-sm">
+                <div className="bg-white p-6 rounded-3xl border border-gray-100 shadow-sm relative overflow-hidden group">
                   <div className="flex items-center gap-3 text-gray-400 mb-4">
                     <History className="w-5 h-5" />
-                    <span className="text-sm font-medium uppercase tracking-wider">总活动次数</span>
+                    <span className="text-sm font-medium uppercase tracking-wider">
+                      {isAnyFilterActive ? "当前筛选活动次数" : "总活动次数"}
+                    </span>
                   </div>
                   <div className="text-4xl font-black text-violet-600">{stats?.total.toLocaleString()}</div>
+                  {isAnyFilterActive && (
+                    <button 
+                      onClick={() => {
+                        setSelectedDomain(null);
+                        setSelectedHour(null);
+                        setSelectedWeekday(null);
+                      }}
+                      className="absolute top-4 right-4 p-1 hover:bg-red-50 rounded-full text-gray-400 hover:text-red-500 transition-colors"
+                      title="清除所有筛选"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  )}
                 </div>
                 <div className="bg-white p-6 rounded-3xl border border-gray-100 shadow-sm">
                   <div className="flex items-center gap-3 text-gray-400 mb-4">
@@ -681,11 +770,51 @@ export default function App() {
                 <div className="bg-white p-6 rounded-3xl border border-gray-100 shadow-sm">
                   <div className="flex items-center gap-3 text-gray-400 mb-4">
                     <TrendingUp className="w-5 h-5" />
-                    <span className="text-sm font-medium uppercase tracking-wider">分析状态</span>
+                    <span className="text-sm font-medium uppercase tracking-wider">
+                      {isAnyFilterActive ? "当前筛选" : "分析状态"}
+                    </span>
                   </div>
-                  <div className="flex items-center gap-2">
-                    <div className={cn("w-3 h-3 rounded-full", analyzing ? "bg-amber-400 animate-pulse" : "bg-green-400")} />
-                    <span className="font-bold">{analyzing ? "分析中..." : "分析完成"}</span>
+                  <div className="flex flex-wrap items-center gap-2">
+                    {isAnyFilterActive ? (
+                      <div className="flex flex-wrap items-center gap-2">
+                        {selectedDomain && (
+                          <div className="flex items-center gap-1 bg-violet-50 text-violet-700 px-2 py-1 rounded-full text-xs font-bold border border-violet-100">
+                            <Globe className="w-3 h-3" />
+                            {selectedDomain}
+                            <X className="w-3 h-3 cursor-pointer hover:text-red-500" onClick={() => setSelectedDomain(null)} />
+                          </div>
+                        )}
+                        {selectedHour !== null && (
+                          <div className="flex items-center gap-1 bg-blue-50 text-blue-700 px-2 py-1 rounded-full text-xs font-bold border border-blue-100">
+                            <Clock className="w-3 h-3" />
+                            {selectedHour}:00
+                            <X className="w-3 h-3 cursor-pointer hover:text-red-500" onClick={() => setSelectedHour(null)} />
+                          </div>
+                        )}
+                        {selectedWeekday !== null && (
+                          <div className="flex items-center gap-1 bg-indigo-50 text-indigo-700 px-2 py-1 rounded-full text-xs font-bold border border-indigo-100">
+                            <Calendar className="w-3 h-3" />
+                            {['周日', '周一', '周二', '周三', '周四', '周五', '周六'][selectedWeekday]}
+                            <X className="w-3 h-3 cursor-pointer hover:text-red-500" onClick={() => setSelectedWeekday(null)} />
+                          </div>
+                        )}
+                        <button 
+                          onClick={() => {
+                            setSelectedDomain(null);
+                            setSelectedHour(null);
+                            setSelectedWeekday(null);
+                          }}
+                          className="flex items-center gap-1 px-2 py-1 bg-red-50 text-red-600 hover:bg-red-100 rounded-full text-[10px] font-bold transition-all border border-red-100"
+                        >
+                          清除全部
+                        </button>
+                      </div>
+                    ) : (
+                      <>
+                        <div className={cn("w-3 h-3 rounded-full", analyzing ? "bg-amber-400 animate-pulse" : "bg-green-400")} />
+                        <span className="font-bold">{analyzing ? "分析中..." : "分析完成"}</span>
+                      </>
+                    )}
                   </div>
                 </div>
               </div>
@@ -698,10 +827,11 @@ export default function App() {
                       <Clock className="w-6 h-6 text-violet-600" />
                       <h3 className="text-xl font-bold">活跃时间段</h3>
                     </div>
+                    <span className="text-xs text-gray-400">点击柱状图筛选</span>
                   </div>
                   <div className="h-[300px] w-full">
                     <ResponsiveContainer width="100%" height="100%">
-                      <BarChart data={summary?.timeDistribution}>
+                      <BarChart data={displaySummary?.timeDistribution}>
                         <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f0f0f0" />
                         <XAxis 
                           dataKey="hour" 
@@ -716,9 +846,17 @@ export default function App() {
                           contentStyle={{ borderRadius: '16px', border: 'none', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)' }}
                           labelFormatter={(h) => `${h}:00`}
                         />
-                        <Bar dataKey="count" radius={[4, 4, 0, 0]}>
-                          {summary?.timeDistribution.map((entry, index) => (
-                            <Cell key={`cell-${index}`} fill={entry.count > 0 ? '#8b5cf6' : '#e5e7eb'} />
+                        <Bar 
+                          dataKey="count" 
+                          radius={[4, 4, 0, 0]}
+                          onClick={(data) => setSelectedHour(data.hour)}
+                          className="cursor-pointer"
+                        >
+                          {displaySummary?.timeDistribution.map((entry, index) => (
+                            <Cell 
+                              key={`cell-${index}`} 
+                              fill={selectedHour === entry.hour ? '#4f46e5' : (entry.count > 0 ? '#8b5cf6' : '#e5e7eb')} 
+                            />
                           ))}
                         </Bar>
                       </BarChart>
@@ -733,10 +871,11 @@ export default function App() {
                       <Calendar className="w-6 h-6 text-indigo-600" />
                       <h3 className="text-xl font-bold">周活跃分布</h3>
                     </div>
+                    <span className="text-xs text-gray-400">点击柱状图筛选</span>
                   </div>
                   <div className="h-[300px] w-full">
                     <ResponsiveContainer width="100%" height="100%">
-                      <BarChart data={summary?.weeklyDistribution}>
+                      <BarChart data={displaySummary?.weeklyDistribution}>
                         <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f0f0f0" />
                         <XAxis 
                           dataKey="day" 
@@ -749,9 +888,21 @@ export default function App() {
                           cursor={{ fill: '#f5f3ff' }}
                           contentStyle={{ borderRadius: '16px', border: 'none', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)' }}
                         />
-                        <Bar dataKey="count" radius={[4, 4, 0, 0]}>
-                          {summary?.weeklyDistribution.map((entry, index) => (
-                            <Cell key={`cell-${index}`} fill={entry.count > 0 ? '#6366f1' : '#e5e7eb'} />
+                        <Bar 
+                          dataKey="count" 
+                          radius={[4, 4, 0, 0]}
+                          onClick={(data) => {
+                            const weekDays = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
+                            const idx = weekDays.indexOf(data.day);
+                            if (idx !== -1) setSelectedWeekday(idx);
+                          }}
+                          className="cursor-pointer"
+                        >
+                          {displaySummary?.weeklyDistribution.map((entry, index) => (
+                            <Cell 
+                              key={`cell-${index}`} 
+                              fill={selectedWeekday === index ? '#4338ca' : (entry.count > 0 ? '#6366f1' : '#e5e7eb')} 
+                            />
                           ))}
                         </Bar>
                       </BarChart>
@@ -766,6 +917,7 @@ export default function App() {
                       <Globe className="w-6 h-6 text-blue-600" />
                       <h3 className="text-xl font-bold">最常访问域名</h3>
                     </div>
+                    <span className="text-xs text-gray-400">点击域名查看详情</span>
                   </div>
                   <div className="h-[300px] w-full">
                     <ResponsiveContainer width="100%" height="100%">
@@ -778,9 +930,16 @@ export default function App() {
                           cy="50%"
                           outerRadius={80}
                           label={({ domain }) => domain}
+                          onClick={(data: any) => setSelectedDomain(data.domain)}
+                          className="cursor-pointer"
                         >
                           {summary?.topDomains.map((entry, index) => (
-                            <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
+                            <Cell 
+                              key={`cell-${index}`} 
+                              fill={entry.domain === selectedDomain ? '#4f46e5' : COLORS[index % COLORS.length]} 
+                              stroke={entry.domain === selectedDomain ? '#fff' : 'none'}
+                              strokeWidth={2}
+                            />
                           ))}
                         </Pie>
                         <Tooltip 
@@ -788,6 +947,23 @@ export default function App() {
                         />
                       </PieChart>
                     </ResponsiveContainer>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2 mt-4">
+                    {summary?.topDomains.map((d, i) => (
+                      <button
+                        key={i}
+                        onClick={() => setSelectedDomain(d.domain)}
+                        className={cn(
+                          "flex items-center justify-between p-3 rounded-xl border transition-all text-sm",
+                          selectedDomain === d.domain 
+                            ? "bg-violet-50 border-violet-200 text-violet-700 font-bold" 
+                            : "bg-gray-50 border-gray-100 text-gray-600 hover:border-violet-200"
+                        )}
+                      >
+                        <span className="truncate mr-2">{d.domain}</span>
+                        <span className="text-xs opacity-60">{d.count}次</span>
+                      </button>
+                    ))}
                   </div>
                 </div>
               </div>
@@ -896,7 +1072,7 @@ export default function App() {
                 </div>
                 <div className="h-[300px] w-full">
                   <ResponsiveContainer width="100%" height="100%">
-                    <AreaChart data={summary?.dailyFrequency}>
+                    <AreaChart data={displaySummary?.dailyFrequency}>
                       <defs>
                         <linearGradient id="colorTrend" x1="0" y1="0" x2="0" y2="1">
                           <stop offset="5%" stopColor="#ec4899" stopOpacity={0.3}/>
