@@ -63,6 +63,7 @@ export default function App() {
   const [selectedDomain, setSelectedDomain] = useState<string | null>(null);
   const [selectedHour, setSelectedHour] = useState<number | null>(null);
   const [selectedWeekday, setSelectedWeekday] = useState<number | null>(null);
+  const [showTimeStats, setShowTimeStats] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
 
@@ -148,8 +149,68 @@ export default function App() {
       return;
     }
 
-    setData(allItems);
-    analyzeActivity(allItems);
+    // Deduplicate and Merge items
+    // Sort by startTime
+    const sortedItems = allItems.sort((a, b) => (a.startTime || 0) - (b.startTime || 0));
+    
+    const mergedItems: ActivityItem[] = [];
+    if (sortedItems.length > 0) {
+      let currentGroup = { ...sortedItems[0] };
+      
+      for (let i = 1; i < sortedItems.length; i++) {
+        const next = sortedItems[i];
+        
+        // Calculate current end time
+        const currentEnd = currentGroup.endTime || (currentGroup.startTime || 0) + (currentGroup.duration || 0) * 1000;
+        const nextStart = next.startTime || 0;
+        
+        // If same URL and they overlap or are very close (within 5 seconds)
+        if (currentGroup.url === next.url && nextStart <= currentEnd + 5000) {
+          // Merge them: take the union of their time intervals
+          const nextEnd = next.endTime || nextStart + (next.duration || 0) * 1000;
+          const newEndTime = Math.max(currentEnd, nextEnd);
+          const newStartTime = Math.min(currentGroup.startTime || 0, nextStart);
+          
+          // Calculate new duration (in seconds)
+          // We take the max of existing durations or the new interval duration
+          // This is to handle cases where 'duration' is active time vs wall clock time
+          let newDuration = Math.max(currentGroup.duration || 0, next.duration || 0);
+          const intervalDuration = Math.round((newEndTime - newStartTime) / 1000);
+          
+          // If the interval is much larger than the sum of durations, it might be a gap
+          // But since they are the same URL and "overlapping/close", we assume it's one visit
+          newDuration = Math.max(newDuration, intervalDuration);
+          
+          // Cap duration to 4 hours (14400 seconds) to avoid unrealistic outliers
+          if (newDuration > 14400) {
+            newDuration = 14400;
+          }
+
+          currentGroup = {
+            ...currentGroup,
+            startTime: newStartTime,
+            endTime: newEndTime,
+            duration: newDuration,
+            title: currentGroup.title || next.title
+          };
+        } else {
+          // Cap duration before pushing
+          if ((currentGroup.duration || 0) > 14400) {
+            currentGroup.duration = 14400;
+          }
+          mergedItems.push(currentGroup);
+          currentGroup = { ...next };
+        }
+      }
+      // Cap duration for the last one
+      if ((currentGroup.duration || 0) > 14400) {
+        currentGroup.duration = 14400;
+      }
+      mergedItems.push(currentGroup);
+    }
+
+    setData(mergedItems);
+    analyzeActivity(mergedItems);
   };
 
   const processFile = (file: File): Promise<ActivityItem[]> => {
@@ -245,7 +306,10 @@ export default function App() {
           }
 
           const title = item.title || item.text || item.header || item.url || "无标题";
-          let time = item.time || item.visitTime || item.lastVisitTime || item.timestamp || item.date || item.last_visit_time;
+          let time = item.time || item.visitTime || item.lastVisitTime || item.timestamp || item.date || item.last_visit_time || item.lastSeen || item.startTime;
+          if (item.extensions && item.extensions.lastSeen) {
+            time = time || item.extensions.lastSeen;
+          }
           
           if (item.time_usec) {
             time = new Date(item.time_usec / 1000).toISOString();
@@ -258,11 +322,41 @@ export default function App() {
           const dateObj = time ? new Date(time) : null;
           const isValidDate = dateObj && !isNaN(dateObj.getTime());
 
+          // Extract duration from extensions if available
+          let duration = 0;
+          let startTime = item.startTime || (dateObj ? dateObj.getTime() : 0);
+          let endTime = item.endTime || 0;
+
+          if (item.extensions && typeof item.extensions.totalTime === 'number') {
+            duration = item.extensions.totalTime;
+          } else if (typeof item.totalTime === 'number') {
+            duration = item.totalTime;
+          } else if (typeof item.duration === 'number') {
+            duration = item.duration;
+          } else if (typeof item.startTime === 'number' && typeof item.endTime === 'number') {
+            duration = Math.max(0, Math.round((item.endTime - item.startTime) / 1000));
+          }
+
+          // Heuristic: if duration is suspiciously large (e.g. > 100,000) and we have startTime/endTime
+          // that suggest it might be ms, or if it's just very large for a single visit
+          if (duration > 86400) { // More than 24 hours
+            duration = Math.round(duration / 1000);
+          }
+
+          if (!endTime && startTime && duration) {
+            endTime = startTime + (duration * 1000);
+          } else if (!startTime && endTime && duration) {
+            startTime = endTime - (duration * 1000);
+          }
+
           return {
             ...item,
             title: String(title),
             time: isValidDate ? dateObj.toISOString() : "",
-            url: String(url || "")
+            url: String(url || ""),
+            duration: duration,
+            startTime: startTime,
+            endTime: endTime
           };
         }).filter(item => item.time !== "");
 
@@ -279,65 +373,115 @@ export default function App() {
   const analyzeActivity = async (items: ActivityItem[]) => {
     setAnalyzing(true);
     try {
-      const timeDist = new Array(24).fill(0);
-      const weekDist = new Array(7).fill(0);
-      const dailyFreq: Record<string, number> = {};
-      const domains: Record<string, number> = {};
+      const timeDist = new Array(24).fill(0).map(() => ({ count: 0, duration: 0 }));
+      const weekDist = new Array(7).fill(0).map(() => ({ count: 0, duration: 0 }));
+      const dailyFreq: Record<string, { count: number; duration: number }> = {};
+      const domains: Record<string, { count: number; duration: number }> = {};
       const titles: string[] = [];
+      let totalDuration = 0;
+      
+      // Track data quality metrics
+      let itemsWithDuration = 0;
+      let itemsWithTitle = 0;
+      let itemsWithUrl = 0;
+      const fileTypes = new Set<string>();
 
       const weekDays = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
 
       items.forEach(item => {
+        if (item.duration && item.duration > 0) itemsWithDuration++;
+        if (item.title && item.title !== "无标题") itemsWithTitle++;
+        if (item.url) itemsWithUrl++;
+        
         const timeVal = item.time;
         if (!timeVal) return;
         
         const date = new Date(timeVal);
         if (isNaN(date.getTime())) return;
 
-        timeDist[date.getHours()]++;
-        weekDist[date.getDay()]++;
+        const hour = date.getHours();
+        const day = date.getDay();
+        const duration = item.duration || 0;
+        totalDuration += duration;
+
+        timeDist[hour].count++;
+        timeDist[hour].duration += duration;
+
+        weekDist[day].count++;
+        weekDist[day].duration += duration;
         
         const dateStr = date.toISOString().split('T')[0];
-        dailyFreq[dateStr] = (dailyFreq[dateStr] || 0) + 1;
+        if (!dailyFreq[dateStr]) dailyFreq[dateStr] = { count: 0, duration: 0 };
+        dailyFreq[dateStr].count++;
+        dailyFreq[dateStr].duration += duration;
 
         if (item.title) titles.push(item.title);
         
         if (item.url) {
           try {
             const domain = new URL(item.url).hostname.replace('www.', '');
-            domains[domain] = (domains[domain] || 0) + 1;
+            if (!domains[domain]) domains[domain] = { count: 0, duration: 0 };
+            domains[domain].count++;
+            domains[domain].duration += duration;
           } catch (e) {
             // Invalid URL
           }
         }
       });
 
-      const timeDistribution = timeDist.map((count, hour) => ({ hour, count }));
-      const weeklyDistribution = weekDist.map((count, day) => ({ day: weekDays[day], count }));
+      const timeDistribution = timeDist.map((data, hour) => ({ hour, ...data }));
+      const weeklyDistribution = weekDist.map((data, day) => ({ day: weekDays[day], ...data }));
       
       const dailyFrequency = Object.entries(dailyFreq)
-        .map(([date, count]) => ({ date, count }))
+        .map(([date, data]) => ({ date, ...data }))
         .sort((a, b) => a.date.localeCompare(b.date))
         .slice(-30);
 
       const topDomains = Object.entries(domains)
-        .map(([domain, count]) => ({ domain, count }))
+        .map(([domain, data]) => ({ domain, ...data }))
         .sort((a, b) => b.count - a.count)
-        .slice(0, 6);
+        .slice(0, 15);
+
+      const dataQuality = {
+        hasDuration: itemsWithDuration > items.length * 0.1, // At least 10% have duration
+        hasTitles: itemsWithTitle > items.length * 0.5,
+        hasUrls: itemsWithUrl > items.length * 0.8,
+        totalItems: items.length,
+        durationCoverage: Math.round((itemsWithDuration / items.length) * 100),
+        titleCoverage: Math.round((itemsWithTitle / items.length) * 100)
+      };
 
       // AI Analysis
       let aiSummaryText = "AI 分析未启用或未正确配置。";
 
       if (aiConfig?.enabled) {
         const sampleData = titles.slice(0, 150).join('\n');
-        const domainList = topDomains.map(d => `${d.domain} (${d.count}次)`).join(', ');
-        const prompt = `以下是用户的数字浏览/活动记录：
+        const domainList = topDomains.map(d => `${d.domain} (${d.count}次${(showTimeStats && d.duration > 0) ? `, 约${Math.round(d.duration/60)}分钟` : ''})`).join(', ');
+        
+        const qualityNote = `数据质量概况：
+- 总记录数：${dataQuality.totalItems} (已对重叠和相近的访问记录进行了合并处理，以提高时长准确性)
+- 标题覆盖率：${dataQuality.titleCoverage}%
+- 时长覆盖率：${dataQuality.durationCoverage}%
+${!dataQuality.hasDuration ? '（注意：当前数据源缺乏时长信息，请侧重于访问频率分析）' : ''}
+${!dataQuality.hasTitles ? '（注意：当前数据源缺乏页面标题，请侧重于域名分类分析）' : ''}`;
+
+        const prompt = `以下是用户的数字浏览/活动记录分析：
+${qualityNote}
+
 主要访问域名：${domainList}
+${showTimeStats && dataQuality.hasDuration ? `总计浏览时长：${Math.round(totalDuration / 3600)} 小时 ${Math.round((totalDuration % 3600) / 60)} 分钟` : ''}
+
 部分页面标题：
 ${sampleData}
 
-请根据这些数据分析用户的数字生活习惯、兴趣领域、工作/娱乐倾向，并给出一个深度总结。
-请使用结构化的 Markdown 格式（如使用 ### 标题、- 列表、**加粗** 等），确保排版整洁公整、层次分明。请用中文回答。`;
+请根据这些数据（考虑到上述数据质量限制）深度分析用户的数字生活。
+1. **行为特征**：用户的专注度、碎片化程度如何？
+2. **兴趣画像**：根据域名和标题推测其职业、爱好或当前关注点。
+3. **时段规律**：分析其工作流或娱乐的高峰期。
+4. **数据质量评估**：${!showTimeStats ? "由于未开启时长统计，请侧重于访问频率和域名分布的分析。" : "已开启时长统计，但请注意，时长数据可能包含挂机或闲置时间。系统已尝试合并重叠记录并对单次访问时长进行了 4 小时的上限限制，请在分析时考虑这些因素。"}
+5. **综合评价**：给出一个客观、专业的数字生活评价。
+
+请使用结构化的 Markdown 格式，确保排版整洁公整、层次分明。请用中文回答。`;
 
         try {
           if (aiConfig.provider === 'gemini') {
@@ -374,6 +518,7 @@ ${sampleData}
         weeklyDistribution,
         dailyFrequency,
         topDomains,
+        totalDuration,
         aiSummary: aiSummaryText
       });
 
@@ -480,12 +625,15 @@ ${sampleData}
   const stats = useMemo(() => {
     if (!filteredData.length) return null;
     const validTimes = filteredData.map(d => new Date(d.time).getTime()).filter(t => !isNaN(t));
-    if (!validTimes.length) return { total: filteredData.length, firstDate: '未知', lastDate: '未知' };
+    const totalDuration = filteredData.reduce((acc, curr) => acc + (curr.duration || 0), 0);
+    
+    if (!validTimes.length) return { total: filteredData.length, firstDate: '未知', lastDate: '未知', totalDuration };
     
     return {
       total: filteredData.length,
       firstDate: new Date(Math.min(...validTimes)).toLocaleDateString(),
       lastDate: new Date(Math.max(...validTimes)).toLocaleDateString(),
+      totalDuration
     };
   }, [filteredData]);
 
@@ -494,43 +642,58 @@ ${sampleData}
     const isFiltered = selectedDomain !== null || selectedHour !== null || selectedWeekday !== null;
     if (!isFiltered) return null;
 
-    const timeDist = new Array(24).fill(0);
-    const weekDist = new Array(7).fill(0);
-    const dailyFreq: Record<string, number> = {};
-    const domains: Record<string, number> = {};
+    const timeDist = new Array(24).fill(0).map(() => ({ count: 0, duration: 0 }));
+    const weekDist = new Array(7).fill(0).map(() => ({ count: 0, duration: 0 }));
+    const dailyFreq: Record<string, { count: number; duration: number }> = {};
+    const domains: Record<string, { count: number; duration: number }> = {};
     const weekDays = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
+    let totalDuration = 0;
 
     filteredData.forEach(item => {
       const date = new Date(item.time);
       if (isNaN(date.getTime())) return;
       
-      timeDist[date.getHours()]++;
-      weekDist[date.getDay()]++;
+      const hour = date.getHours();
+      const day = date.getDay();
+      const duration = item.duration || 0;
+      totalDuration += duration;
+
+      timeDist[hour].count++;
+      timeDist[hour].duration += duration;
+
+      weekDist[day].count++;
+      weekDist[day].duration += duration;
       
       const dateStr = date.toISOString().split('T')[0];
-      dailyFreq[dateStr] = (dailyFreq[dateStr] || 0) + 1;
+      if (!dailyFreq[dateStr]) dailyFreq[dateStr] = { count: 0, duration: 0 };
+      dailyFreq[dateStr].count++;
+      dailyFreq[dateStr].duration += duration;
 
       if (item.url) {
         try {
           const domain = new URL(item.url).hostname.replace('www.', '');
-          domains[domain] = (domains[domain] || 0) + 1;
+          if (!domains[domain]) domains[domain] = { count: 0, duration: 0 };
+          domains[domain].count++;
+          domains[domain].duration += duration;
         } catch (e) {}
       }
     });
 
     return {
-      timeDistribution: timeDist.map((count, hour) => ({ hour, count })),
-      weeklyDistribution: weekDist.map((count, day) => ({ day: weekDays[day], count })),
+      timeDistribution: timeDist.map((data, hour) => ({ hour, ...data })),
+      weeklyDistribution: weekDist.map((data, day) => ({ day: weekDays[day], ...data })),
       dailyFrequency: Object.entries(dailyFreq)
-        .map(([date, count]) => ({ date, count }))
+        .map(([date, data]) => ({ date, ...data }))
         .sort((a, b) => a.date.localeCompare(b.date))
         .slice(-30),
       topDomains: Object.entries(domains)
-        .map(([domain, count]) => ({ domain, count }))
+        .map(([domain, data]) => ({ domain, ...data }))
         .sort((a, b) => b.count - a.count)
         .slice(0, 6),
+      totalDuration,
+      aiSummary: summary?.aiSummary || ""
     };
-  }, [filteredData, selectedDomain, selectedHour, selectedWeekday, data]);
+  }, [filteredData, selectedDomain, selectedHour, selectedWeekday, data, summary]);
 
   const displaySummary = filteredSummary || summary;
   const isAnyFilterActive = selectedDomain !== null || selectedHour !== null || selectedWeekday !== null;
@@ -579,6 +742,22 @@ ${sampleData}
             <h1 className="font-bold text-xl tracking-tight">数字足迹分析器</h1>
           </div>
           <div className="flex items-center gap-4">
+            <div className="flex items-center gap-2 px-3 py-1.5 bg-gray-50 rounded-xl border border-gray-100">
+              <Clock className={cn("w-4 h-4", showTimeStats ? "text-violet-600" : "text-gray-400")} />
+              <span className="text-xs font-bold text-gray-600">时长统计</span>
+              <button 
+                onClick={() => setShowTimeStats(!showTimeStats)}
+                className={cn(
+                  "w-8 h-4 rounded-full relative transition-colors duration-200",
+                  showTimeStats ? "bg-violet-600" : "bg-gray-300"
+                )}
+              >
+                <div className={cn(
+                  "absolute top-0.5 w-3 h-3 bg-white rounded-full transition-transform duration-200",
+                  showTimeStats ? "translate-x-4.5" : "translate-x-0.5"
+                )} />
+              </button>
+            </div>
             {data.length > 0 && (
               <button 
                 onClick={exportResults}
@@ -745,7 +924,10 @@ ${sampleData}
               className="space-y-8"
             >
               {/* Stats Overview */}
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+              <div className={cn(
+                "grid gap-6",
+                showTimeStats ? "grid-cols-1 sm:grid-cols-2 lg:grid-cols-4" : "grid-cols-1 md:grid-cols-3"
+              )}>
                 <div className="bg-white p-6 rounded-3xl border border-gray-100 shadow-sm relative overflow-hidden group">
                   <div className="flex items-center gap-3 text-gray-400 mb-4">
                     <History className="w-5 h-5" />
@@ -768,12 +950,27 @@ ${sampleData}
                     </button>
                   )}
                 </div>
+                {showTimeStats && (
+                  <div className="bg-white p-6 rounded-3xl border border-gray-100 shadow-sm">
+                    <div className="flex items-center gap-3 text-gray-400 mb-4">
+                      <Clock className="w-5 h-5" />
+                      <span className="text-sm font-medium uppercase tracking-wider">总计浏览时长</span>
+                    </div>
+                    <div className="text-4xl font-black text-indigo-600">
+                      {stats?.totalDuration ? (
+                        stats.totalDuration > 3600 
+                          ? `${(stats.totalDuration / 3600).toFixed(1)}h` 
+                          : `${Math.round(stats.totalDuration / 60)}m`
+                      ) : "0m"}
+                    </div>
+                  </div>
+                )}
                 <div className="bg-white p-6 rounded-3xl border border-gray-100 shadow-sm">
                   <div className="flex items-center gap-3 text-gray-400 mb-4">
                     <Calendar className="w-5 h-5" />
                     <span className="text-sm font-medium uppercase tracking-wider">时间跨度</span>
                   </div>
-                  <div className="text-xl font-bold">{stats?.firstDate} — {stats?.lastDate}</div>
+                  <div className="text-xl font-bold text-gray-900">{stats?.firstDate} — {stats?.lastDate}</div>
                 </div>
                 <div className="bg-white p-6 rounded-3xl border border-gray-100 shadow-sm">
                   <div className="flex items-center gap-3 text-gray-400 mb-4">
@@ -855,12 +1052,18 @@ ${sampleData}
                           labelFormatter={(h) => `${h}:00`}
                           content={({ active, payload }) => {
                             if (active && payload && payload.length) {
+                              const data = payload[0].payload;
                               return (
                                 <div className="bg-white p-3 rounded-xl shadow-xl border border-gray-50">
-                                  <p className="text-xs text-gray-400 mb-1">{payload[0].payload.hour}:00</p>
+                                  <p className="text-xs text-gray-400 mb-1">{data.hour}:00</p>
                                   <p className="text-sm font-bold text-violet-600">
-                                    {payload[0].value} 次打开
+                                    {data.count} 次打开
                                   </p>
+                                  {showTimeStats && data.duration > 0 && (
+                                    <p className="text-[10px] text-gray-400 mt-1">
+                                      时长: {data.duration > 3600 ? `${(data.duration/3600).toFixed(1)}h` : `${Math.round(data.duration/60)}m`}
+                                    </p>
+                                  )}
                                 </div>
                               );
                             }
@@ -886,9 +1089,19 @@ ${sampleData}
                   {selectedHour !== null && (
                     <div className="mt-4 p-4 bg-violet-50 rounded-3xl border border-violet-100 space-y-3">
                       <div className="flex items-center justify-between">
-                        <span className="text-sm text-violet-700 font-bold">
-                          {selectedHour}:00 时段共访问
-                        </span>
+                        <div className="flex flex-col">
+                          <span className="text-sm text-violet-700 font-bold">
+                            {selectedHour}:00 时段共访问
+                          </span>
+                          {showTimeStats && displaySummary?.timeDistribution.find(d => d.hour === selectedHour)?.duration ? (
+                            <span className="text-[10px] text-violet-400 font-medium">
+                              累计时长: {(() => {
+                                const d = displaySummary.timeDistribution.find(d => d.hour === selectedHour)?.duration || 0;
+                                return d > 3600 ? `${(d/3600).toFixed(1)}h` : `${Math.round(d/60)}m`;
+                              })()}
+                            </span>
+                          ) : null}
+                        </div>
                         <span className="text-xl font-black text-violet-600">
                           {displaySummary?.timeDistribution.find(d => d.hour === selectedHour)?.count || 0} 次
                         </span>
@@ -934,12 +1147,18 @@ ${sampleData}
                           contentStyle={{ borderRadius: '16px', border: 'none', boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)' }}
                           content={({ active, payload }) => {
                             if (active && payload && payload.length) {
+                              const data = payload[0].payload;
                               return (
                                 <div className="bg-white p-3 rounded-xl shadow-xl border border-gray-50">
-                                  <p className="text-xs text-gray-400 mb-1">{payload[0].payload.day}</p>
+                                  <p className="text-xs text-gray-400 mb-1">{data.day}</p>
                                   <p className="text-sm font-bold text-indigo-600">
-                                    {payload[0].value} 次打开
+                                    {data.count} 次打开
                                   </p>
+                                  {showTimeStats && data.duration > 0 && (
+                                    <p className="text-[10px] text-gray-400 mt-1">
+                                      时长: {data.duration > 3600 ? `${(data.duration/3600).toFixed(1)}h` : `${Math.round(data.duration/60)}m`}
+                                    </p>
+                                  )}
                                 </div>
                               );
                             }
@@ -969,9 +1188,19 @@ ${sampleData}
                   {selectedWeekday !== null && (
                     <div className="mt-4 p-4 bg-indigo-50 rounded-3xl border border-indigo-100 space-y-3">
                       <div className="flex items-center justify-between">
-                        <span className="text-sm text-indigo-700 font-bold">
-                          {['周日', '周一', '周二', '周三', '周四', '周五', '周六'][selectedWeekday]} 共访问
-                        </span>
+                        <div className="flex flex-col">
+                          <span className="text-sm text-indigo-700 font-bold">
+                            {['周日', '周一', '周二', '周三', '周四', '周五', '周六'][selectedWeekday]} 共访问
+                          </span>
+                          {showTimeStats && displaySummary?.weeklyDistribution[selectedWeekday]?.duration ? (
+                            <span className="text-[10px] text-indigo-400 font-medium">
+                              累计时长: {(() => {
+                                const d = displaySummary.weeklyDistribution[selectedWeekday]?.duration || 0;
+                                return d > 3600 ? `${(d/3600).toFixed(1)}h` : `${Math.round(d/60)}m`;
+                              })()}
+                            </span>
+                          ) : null}
+                        </div>
                         <span className="text-xl font-black text-indigo-600">
                           {displaySummary?.weeklyDistribution[selectedWeekday]?.count || 0} 次
                         </span>
@@ -1044,8 +1273,15 @@ ${sampleData}
                             : "bg-gray-50 border-gray-100 text-gray-600 hover:border-violet-200"
                         )}
                       >
-                        <span className="truncate mr-2">{d.domain}</span>
-                        <span className="text-xs opacity-60">{d.count}次</span>
+                        <div className="flex flex-col items-start overflow-hidden">
+                          <span className="truncate w-full">{d.domain}</span>
+                          {showTimeStats && d.duration > 0 && (
+                            <span className="text-[10px] opacity-40 font-normal">
+                              {d.duration > 3600 ? `${(d.duration/3600).toFixed(1)}h` : `${Math.round(d.duration/60)}m`}
+                            </span>
+                          )}
+                        </div>
+                        <span className="text-xs opacity-60 ml-2">{d.count}次</span>
                       </button>
                     ))}
                   </div>

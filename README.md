@@ -1,7 +1,5 @@
 # Digital Activity Analyzer (数字足迹分析器)
 
-- 本项目基于Google AI studio进行开发
-
 这是一个基于 React 和 Google Gemini AI 的全方位数字生活分析工具。它可以解析用户的浏览器历史记录、视频观看记录以及各种数字活动日志，并生成深度的可视化报告和 AI 洞察总结。
 
 ## 核心功能
